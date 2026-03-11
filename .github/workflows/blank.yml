@@ -42,15 +42,15 @@ jobs:
             .\vcpkg\vcpkg install curl:x64-windows-static
           }
         shell: pwsh
-
+        
       - name: 编译 myfetch (${{ matrix.arch }})
         run: |
-          if "%arch%"=="x86" (
+          if "${{ matrix.arch }}"=="x86" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           )
-
+      
           cl /nologo /O2 /MT ^
           /I vcpkg\installed\${{ matrix.arch }}-windows-static\include ^
           myfetch.c ^
