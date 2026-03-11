@@ -1,4 +1,4 @@
-name: 编译 myfetch (32位 + 64位)
+name: 编译 myfetch
 
 on:
   push:
@@ -17,40 +17,28 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 CMake (避免 vcpkg 下载失败)
+      - name: 安装 CMake
         uses: lukka/get-cmake@latest
 
-      - name: 缓存 vcpkg
-        uses: actions/cache@v4
-        with:
-          path: vcpkg
-          key: vcpkg-${{ matrix.arch }}
-
       - name: 获取 vcpkg
-        if: steps.cache.outputs.cache-hit != 'true'
         run: git clone https://github.com/microsoft/vcpkg.git
 
       - name: 初始化 vcpkg
-        run: .\vcpkg\bootstrap-vcpkg.bat
+        run: vcpkg\bootstrap-vcpkg.bat
         shell: cmd
 
-      - name: 安装 libcurl (${{ matrix.arch }})
-        run: |
-          if ("${{ matrix.arch }}" -eq "x86") {
-            .\vcpkg\vcpkg install curl:x86-windows-static
-          } else {
-            .\vcpkg\vcpkg install curl:x64-windows-static
-          }
-        shell: pwsh
-        
-      - name: 编译 myfetch (${{ matrix.arch }})
+      - name: 安装 libcurl
+        run: vcpkg\vcpkg install curl:${{ matrix.arch }}-windows-static
+        shell: cmd
+
+      - name: 编译 myfetch
         run: |
           if "${{ matrix.arch }}"=="x86" (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
           ) else (
             call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           )
-      
+
           cl /nologo /O2 /MT ^
           /I vcpkg\installed\${{ matrix.arch }}-windows-static\include ^
           myfetch.c ^
@@ -59,7 +47,7 @@ jobs:
           /Fe:myfetch-${{ matrix.arch }}.exe
         shell: cmd
 
-      - name: 上传编译结果 (${{ matrix.arch }})
+      - name: 上传 EXE
         uses: actions/upload-artifact@v4
         with:
           name: myfetch-${{ matrix.arch }}
