@@ -168,6 +168,9 @@ void cleanup_tmp(int threads)
 
 int main(int argc,char *argv[])
 {
+    // 设置控制台输出为 UTF-8 编码，避免中文乱码
+    SetConsoleOutputCP(CP_UTF8);
+
     if(argc != 6)
     {
         printf("用法:\n");
