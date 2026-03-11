@@ -42,7 +42,7 @@ jobs:
           cl /nologo /O2 /MT ^
           /I vcpkg\installed\${{ matrix.arch }}-windows-static\include ^
           myfetch.c ^
-          vcpkg\installed\${{ matrix.arch }}-windows-static\lib\libcurl_a.lib ^
+          vcpkg\installed\${{ matrix.arch }}-windows-static\lib\libcurl.lib ^
           ws2_32.lib wldap32.lib crypt32.lib ^
           /Fe:myfetch-${{ matrix.arch }}.exe
         shell: cmd
