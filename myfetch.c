@@ -5,23 +5,30 @@
 #include <curl/curl.h>
 
 typedef struct {
+    long long offset;
+    HANDLE file;
+} WriteCtx;
+
+typedef struct {
     char url[1024];
     char resolve[256];
-    long start;
-    long end;
-    int success;
     HANDLE file;
-    long long offset;
+    int success;
 } ThreadData;
 
 volatile long long total_downloaded = 0;
 long long total_size = 0;
 
+long long next_chunk = 0;
+long long chunk_size = 4LL * 1024 * 1024;
+
+volatile int global_failed = 0;
+
 CRITICAL_SECTION lock;
 
 size_t write_data(void *ptr,size_t size,size_t nmemb,void *userdata)
 {
-    ThreadData *data = (ThreadData*)userdata;
+    WriteCtx *ctx = (WriteCtx*)userdata;
 
     DWORD written = 0;
     DWORD towrite = (DWORD)(size * nmemb);
@@ -29,13 +36,13 @@ size_t write_data(void *ptr,size_t size,size_t nmemb,void *userdata)
     OVERLAPPED ov;
     memset(&ov,0,sizeof(ov));
 
-    ov.Offset     = (DWORD)(data->offset & 0xffffffff);
-    ov.OffsetHigh = (DWORD)((data->offset >> 32) & 0xffffffff);
+    ov.Offset     = (DWORD)(ctx->offset & 0xffffffff);
+    ov.OffsetHigh = (DWORD)((ctx->offset >> 32) & 0xffffffff);
 
-    if(!WriteFile(data->file,ptr,towrite,&written,&ov))
+    if(!WriteFile(ctx->file,ptr,towrite,&written,&ov))
         return 0;
 
-    data->offset += written;
+    ctx->offset += written;
 
     EnterCriticalSection(&lock);
     total_downloaded += written;
@@ -48,58 +55,88 @@ DWORD WINAPI download_thread(LPVOID arg)
 {
     ThreadData *data = (ThreadData*)arg;
 
-    int retry = 0;
-
-    while(retry < 3)
+    while(1)
     {
-        data->offset = data->start;   // 修复：重试时重置 offset
-
-        CURL *curl = curl_easy_init();
-        if(!curl)
-            return 1;
-
-        struct curl_slist *resolve = NULL;
-        resolve = curl_slist_append(resolve,data->resolve);
-
-        char range[64];
-        sprintf(range,"%ld-%ld",data->start,data->end);
-
-        curl_easy_setopt(curl,CURLOPT_URL,data->url);
-        curl_easy_setopt(curl,CURLOPT_RESOLVE,resolve);
-        curl_easy_setopt(curl,CURLOPT_RANGE,range);
-
-        curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,write_data);
-        curl_easy_setopt(curl,CURLOPT_WRITEDATA,data);
-
-        curl_easy_setopt(curl,CURLOPT_SSL_VERIFYPEER,0L);
-        curl_easy_setopt(curl,CURLOPT_SSL_VERIFYHOST,0L);
-        curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
-
-        curl_easy_setopt(curl,CURLOPT_BUFFERSIZE,102400L);
-
-        CURLcode res = curl_easy_perform(curl);
-
-        curl_slist_free_all(resolve);
-        curl_easy_cleanup(curl);
-
-        if(res == CURLE_OK)
+        if(global_failed)
         {
-            data->success = 1;
-            return 0;
+            data->success = 0;
+            return 1;
         }
 
-        retry++;
-        Sleep(1000);
+        long long start;
+
+        EnterCriticalSection(&lock);
+        start = next_chunk;
+        next_chunk += chunk_size;
+        LeaveCriticalSection(&lock);
+
+        if(start >= total_size)
+            break;
+
+        long long end = start + chunk_size - 1;
+        if(end >= total_size)
+            end = total_size - 1;
+
+        int retry = 0;
+
+        while(retry < 3)
+        {
+            if(global_failed)
+            {
+                data->success = 0;
+                return 1;
+            }
+
+            CURL *curl = curl_easy_init();
+            if(!curl)
+                break;
+
+            struct curl_slist *resolve = NULL;
+            resolve = curl_slist_append(resolve,data->resolve);
+
+            char range[128];
+            sprintf(range,"%lld-%lld",start,end);
+
+            WriteCtx ctx;
+            ctx.offset = start;
+            ctx.file   = data->file;
+
+            curl_easy_setopt(curl,CURLOPT_URL,data->url);
+            curl_easy_setopt(curl,CURLOPT_RESOLVE,resolve);
+            curl_easy_setopt(curl,CURLOPT_RANGE,range);
+
+            curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,write_data);
+            curl_easy_setopt(curl,CURLOPT_WRITEDATA,&ctx);
+
+            curl_easy_setopt(curl,CURLOPT_SSL_VERIFYPEER,0L);
+            curl_easy_setopt(curl,CURLOPT_SSL_VERIFYHOST,0L);
+            curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
+
+            curl_easy_setopt(curl,CURLOPT_BUFFERSIZE,1024*1024L);
+            curl_easy_setopt(curl,CURLOPT_TCP_NODELAY,1L);
+
+            CURLcode res = curl_easy_perform(curl);
+
+            curl_slist_free_all(resolve);
+            curl_easy_cleanup(curl);
+
+            if(res == CURLE_OK)
+                break;
+
+            retry++;
+            Sleep(1000);
+        }
+
+        if(retry == 3)
+        {
+            global_failed = 1;
+            data->success = 0;
+            return 1;
+        }
     }
 
-    data->success = 0;
-    return 1;
-}
-
-size_t single_write(void *ptr,size_t size,size_t nmemb,void *userdata)
-{
-    FILE *fp = (FILE*)userdata;
-    return fwrite(ptr,size,nmemb,fp);
+    data->success = 1;
+    return 0;
 }
 
 long get_file_size(const char *url,const char *resolve)
@@ -117,7 +154,6 @@ long get_file_size(const char *url,const char *resolve)
 
     curl_easy_setopt(curl,CURLOPT_SSL_VERIFYPEER,0L);
     curl_easy_setopt(curl,CURLOPT_SSL_VERIFYHOST,0L);
-    curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
 
     CURLcode res = curl_easy_perform(curl);
 
@@ -136,11 +172,36 @@ long get_file_size(const char *url,const char *resolve)
     return filesize;
 }
 
+int check_range_support(const char *url,const char *resolve)
+{
+    CURL *curl = curl_easy_init();
+    if(!curl)
+        return 0;
+
+    struct curl_slist *resolve_list = NULL;
+    resolve_list = curl_slist_append(resolve_list,resolve);
+
+    curl_easy_setopt(curl,CURLOPT_URL,url);
+    curl_easy_setopt(curl,CURLOPT_RANGE,"0-0");
+    curl_easy_setopt(curl,CURLOPT_NOBODY,1L);
+    curl_easy_setopt(curl,CURLOPT_RESOLVE,resolve_list);
+
+    long code = 0;
+
+    if(curl_easy_perform(curl) == CURLE_OK)
+        curl_easy_getinfo(curl,CURLINFO_RESPONSE_CODE,&code);
+
+    curl_slist_free_all(resolve_list);
+    curl_easy_cleanup(curl);
+
+    return (code == 206);
+}
+
 DWORD WINAPI speed_thread(LPVOID arg)
 {
     long long last = 0;
 
-    while(total_downloaded < total_size)
+    while(total_downloaded < total_size && !global_failed)
     {
         Sleep(1000);
 
@@ -165,7 +226,25 @@ DWORD WINAPI speed_thread(LPVOID arg)
     return 0;
 }
 
-int single_thread_download(char *url,char *resolve)
+void extract_filename(const char *url,char *name)
+{
+    const char *p = strrchr(url,'/');
+    p = p ? p+1 : "download.file";
+
+    strncpy(name,p,511);
+    name[511] = 0;
+
+    char *q = strchr(name,'?');
+    if(q) *q = 0;
+}
+
+size_t single_write(void *ptr,size_t size,size_t nmemb,void *userdata)
+{
+    FILE *fp = (FILE*)userdata;
+    return fwrite(ptr,size,nmemb,fp);
+}
+
+int single_thread_download(char *url,char *resolve,char *filename)
 {
     CURL *curl = curl_easy_init();
     if(!curl)
@@ -174,27 +253,17 @@ int single_thread_download(char *url,char *resolve)
     struct curl_slist *resolve_list = NULL;
     resolve_list = curl_slist_append(resolve_list,resolve);
 
-    const char *outname = strrchr(url,'/');
-    outname = outname ? outname+1 : "download.file";
-
-    FILE *fp = fopen(outname,"wb");
+    FILE *fp = fopen(filename,"wb");
     if(!fp)
-    {
-        printf("无法创建文件\n");
         return 1;
-    }
 
     curl_easy_setopt(curl,CURLOPT_URL,url);
     curl_easy_setopt(curl,CURLOPT_RESOLVE,resolve_list);
-
     curl_easy_setopt(curl,CURLOPT_WRITEFUNCTION,single_write);
     curl_easy_setopt(curl,CURLOPT_WRITEDATA,fp);
 
     curl_easy_setopt(curl,CURLOPT_SSL_VERIFYPEER,0L);
     curl_easy_setopt(curl,CURLOPT_SSL_VERIFYHOST,0L);
-    curl_easy_setopt(curl,CURLOPT_FOLLOWLOCATION,1L);
-
-    printf("服务器不支持 Range，使用单线程下载...\n");
 
     CURLcode res = curl_easy_perform(curl);
 
@@ -202,21 +271,11 @@ int single_thread_download(char *url,char *resolve)
     curl_easy_cleanup(curl);
     fclose(fp);
 
-    if(res != CURLE_OK)
-    {
-        printf("下载失败: %s\n",curl_easy_strerror(res));
-        DeleteFileA(outname);
-        return 1;
-    }
-
-    printf("完成: %s\n",outname);
-    return 0;
+    return res != CURLE_OK;
 }
 
 int main(int argc,char *argv[])
 {
-    SetConsoleOutputCP(CP_UTF8);
-
     if(argc != 6)
     {
         printf("用法:\n");
@@ -230,8 +289,8 @@ int main(int argc,char *argv[])
 
     char *host = argv[2];
     char *port = argv[3];
-    char *ip = argv[4];
-    char *url = argv[5];
+    char *ip   = argv[4];
+    char *url  = argv[5];
 
     char resolve[256];
     sprintf(resolve,"%s:%s:%s",host,port,ip);
@@ -241,27 +300,33 @@ int main(int argc,char *argv[])
     total_size = get_file_size(url,resolve);
 
     if(total_size <= 0)
-        return single_thread_download(url,resolve);
+    {
+        printf("无法获取文件大小\n");
+        return 1;
+    }
 
-    printf("文件大小: %.2f MB\n",total_size / 1024.0 / 1024.0);
+    char filename[512];
+    extract_filename(url,filename);
 
-    const char *outname = strrchr(url,'/');
-    outname = outname ? outname+1 : "download.file";
+    if(!check_range_support(url,resolve))
+    {
+        printf("服务器不支持 Range，使用单线程下载\n");
+        return single_thread_download(url,resolve,filename);
+    }
+
+    printf("文件大小: %.2f MB\n",total_size/1024.0/1024.0);
+
+    char tempname[512];
+    sprintf(tempname,"%s.part",filename);
 
     HANDLE file = CreateFileA(
-        outname,
+        tempname,
         GENERIC_WRITE,
         FILE_SHARE_WRITE,
         NULL,
         CREATE_ALWAYS,
         FILE_ATTRIBUTE_NORMAL,
         NULL);
-
-    if(file == INVALID_HANDLE_VALUE)
-    {
-        printf("无法创建文件\n");
-        return 1;
-    }
 
     LARGE_INTEGER size;
     size.QuadPart = total_size;
@@ -270,8 +335,6 @@ int main(int argc,char *argv[])
 
     InitializeCriticalSection(&lock);
 
-    long part = total_size / threads;
-
     HANDLE *handles = malloc(sizeof(HANDLE)*threads);
     ThreadData *data = malloc(sizeof(ThreadData)*threads);
 
@@ -279,14 +342,6 @@ int main(int argc,char *argv[])
     {
         strcpy(data[i].url,url);
         strcpy(data[i].resolve,resolve);
-
-        data[i].start = part * i;
-
-        if(i == threads-1)
-            data[i].end = total_size - 1;
-        else
-            data[i].end = (part*(i+1)) - 1;
-
         data[i].file = file;
         data[i].success = 0;
 
@@ -311,7 +366,6 @@ int main(int argc,char *argv[])
     CloseHandle(speed);
 
     DeleteCriticalSection(&lock);
-
     CloseHandle(file);
 
     free(handles);
@@ -319,14 +373,19 @@ int main(int argc,char *argv[])
 
     curl_global_cleanup();
 
+    if(total_downloaded != total_size)
+        all_success = 0;
+
     if(!all_success)
     {
         printf("\n下载失败\n");
-        DeleteFileA(outname);
+        DeleteFileA(tempname);
         return 1;
     }
 
-    printf("\n完成: %s\n",outname);
+    MoveFileExA(tempname,filename,MOVEFILE_REPLACE_EXISTING);
+
+    printf("\n完成: %s\n",filename);
 
     return 0;
 }
