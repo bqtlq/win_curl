@@ -3,22 +3,39 @@ name: 编译 myfetch (32位 + 64位)
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:        # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
+
     strategy:
       matrix:
-        arch: [x86, x64]    # 同时编译两种架构
+        arch: [x86, x64]
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 vcpkg 和 libcurl (${{ matrix.arch }})
+      - name: 安装 CMake (避免 vcpkg 下载失败)
+        uses: lukka/get-cmake@latest
+
+      - name: 缓存 vcpkg
+        uses: actions/cache@v4
+        with:
+          path: vcpkg
+          key: vcpkg-${{ matrix.arch }}
+
+      - name: 获取 vcpkg
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: git clone https://github.com/microsoft/vcpkg.git
+
+      - name: 初始化 vcpkg
+        run: .\vcpkg\bootstrap-vcpkg.bat
+        shell: cmd
+
+      - name: 安装 libcurl (${{ matrix.arch }})
         run: |
-          git clone https://github.com/Microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat
           if ("${{ matrix.arch }}" -eq "x86") {
             .\vcpkg\vcpkg install curl:x86-windows-static
           } else {
@@ -26,19 +43,20 @@ jobs:
           }
         shell: pwsh
 
-      - name: 设置 MSVC 编译环境 (${{ matrix.arch }})
-        run: |
-          if ("${{ matrix.arch }}" -eq "x86") {
-            & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
-          } else {
-            & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          }
-          echo "环境已配置"
-        shell: pwsh
-
       - name: 编译 myfetch (${{ matrix.arch }})
         run: |
-          cl /nologo /O2 /MT /I vcpkg\installed\${{ matrix.arch }}-windows-static\include myfetch.c /link vcpkg\installed\${{ matrix.arch }}-windows-static\lib\libcurl_a.lib /OUT:myfetch-${{ matrix.arch }}.exe
+          if "%arch%"=="x86" (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          ) else (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+
+          cl /nologo /O2 /MT ^
+          /I vcpkg\installed\${{ matrix.arch }}-windows-static\include ^
+          myfetch.c ^
+          vcpkg\installed\${{ matrix.arch }}-windows-static\lib\libcurl_a.lib ^
+          ws2_32.lib wldap32.lib crypt32.lib ^
+          /Fe:myfetch-${{ matrix.arch }}.exe
         shell: cmd
 
       - name: 上传编译结果 (${{ matrix.arch }})
