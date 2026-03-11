@@ -1,0 +1,48 @@
+name: 编译 myfetch (32位 + 64位)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:        # 允许手动触发
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x86, x64]    # 同时编译两种架构
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 vcpkg 和 libcurl (${{ matrix.arch }})
+        run: |
+          git clone https://github.com/Microsoft/vcpkg.git
+          .\vcpkg\bootstrap-vcpkg.bat
+          if ("${{ matrix.arch }}" -eq "x86") {
+            .\vcpkg\vcpkg install curl:x86-windows-static
+          } else {
+            .\vcpkg\vcpkg install curl:x64-windows-static
+          }
+        shell: pwsh
+
+      - name: 设置 MSVC 编译环境 (${{ matrix.arch }})
+        run: |
+          if ("${{ matrix.arch }}" -eq "x86") {
+            & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          } else {
+            & "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          }
+          echo "环境已配置"
+        shell: pwsh
+
+      - name: 编译 myfetch (${{ matrix.arch }})
+        run: |
+          cl /nologo /O2 /MT /I vcpkg\installed\${{ matrix.arch }}-windows-static\include myfetch.c /link vcpkg\installed\${{ matrix.arch }}-windows-static\lib\libcurl_a.lib /OUT:myfetch-${{ matrix.arch }}.exe
+        shell: cmd
+
+      - name: 上传编译结果 (${{ matrix.arch }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: myfetch-${{ matrix.arch }}
+          path: myfetch-${{ matrix.arch }}.exe
