@@ -43,7 +43,8 @@ jobs:
           /I vcpkg\installed\${{ matrix.arch }}-windows-static\include ^
           myfetch.c ^
           vcpkg\installed\${{ matrix.arch }}-windows-static\lib\libcurl.lib ^
-          ws2_32.lib wldap32.lib crypt32.lib ^
+          vcpkg\installed\${{ matrix.arch }}-windows-static\lib\zlib.lib ^
+          ws2_32.lib wldap32.lib crypt32.lib advapi32.lib iphlpapi.lib secur32.lib ^
           /Fe:myfetch-${{ matrix.arch }}.exe
         shell: cmd
 
